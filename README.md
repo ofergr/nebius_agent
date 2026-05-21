@@ -1,0 +1,82 @@
+# Nebius Customer Support Data Analyst Agent
+
+Assignment 3 project for analyzing the Bitext customer support dataset with a LangGraph ReAct agent.
+
+## Setup
+
+Use Python 3.11. Python 3.14 is currently too new for this dependency stack.
+
+```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+cp .env.example .env
+```
+
+Edit `.env` and set `NEBIUS_API_KEY` to your Nebius Token Factory API key.
+
+The dataset is loaded at runtime from Hugging Face:
+
+```text
+bitext/Bitext-customer-support-llm-chatbot-training-dataset
+```
+
+## Run The CLI
+
+```bash
+python main.py
+use "exit" or "quit" the exit the chat
+```
+
+Ask one question and exit:
+
+```bash
+python main.py --once "What categories exist in the dataset?"
+```
+
+The CLI prints tool calls and observations before the final answer.
+
+## Architecture
+
+Task 1 is implemented as a LangGraph ReAct graph:
+
+- `router`: classifies each user query as `structured`, `unstructured`, or `out_of_scope`.
+- `agent`: Nebius-hosted chat model bound to dataset analysis tools.
+- `tools`: LangGraph `ToolNode` that executes Pydantic-typed tools.
+- Max iterations are controlled by `MAX_ITERATIONS`, defaulting to `12`.
+
+Out-of-scope requests are declined before the model can answer from general knowledge.
+
+## Model Choice
+
+The project uses `meta-llama/Llama-3.3-70B-Instruct` through the Nebius Token Factory OpenAI-compatible API by default. It is a strong general instruction-following model for tool calling, routing context, and concise analytical answers. You can change it with `NEBIUS_MODEL` in `.env`, but all LLM calls should remain on Nebius Token Factory inference models.
+
+## Project Decisions
+
+We chose `meta-llama/Llama-3.3-70B-Instruct` because the agent needs more than simple chat completion. Task 1 requires reliable tool selection, structured dataset analysis, qualitative summarization, multi-step reasoning, and graceful refusal for out-of-scope questions. Since tool-use quality is central to the grading rubric, we prefer a stronger instruction-following model for the initial implementation.
+
+Most factual computation still happens in Python tools, so the model is mainly responsible for routing intent, choosing the right tools, chaining calls when needed, and writing the final answer from tool observations. The model name is configurable through `NEBIUS_MODEL`, so a smaller Nebius Token Factory model can be tested later if speed or cost becomes more important.
+
+We implemented the agent as an explicit LangGraph state graph instead of using `create_react_agent`. This gives us tighter control over the flow required by the assignment: a dedicated router node before tool use, immediate handling of out-of-scope questions, custom stopping logic for repeated empty tool calls, and clearer control over answer style for examples, summaries, and comparisons. `create_react_agent` would reduce boilerplate, but the explicit graph makes the grading-relevant behavior easier to demonstrate and debug.
+
+## Tools
+
+- `list_categories`: returns all dataset categories.
+- `list_intents`: returns intent labels, optionally filtered.
+- `count_rows`: counts rows with optional category, intent, and text filters.
+- `show_examples`: returns customer instruction and support response examples.
+- `distribution`: computes grouped counts by category, intent, or flags.
+- `sample_responses_for_summary`: gathers representative rows for qualitative summaries.
+
+## Task 1 Test Prompts
+
+```text
+What categories exist in the dataset?
+How many refund requests did we get?
+Show me 5 examples of the SHIPPING category.
+Summarize how agents respond to complaint intents.
+Show me examples of people wanting their money back.
+What is the distribution of intents in the ACCOUNT category?
+What's the best CRM software for handling complaints?
+Who is the president of France?
+```
