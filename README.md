@@ -232,6 +232,76 @@ MCP_SERVER_PORT
 MCP_SERVER_PATH
 ```
 
+## Bonus B — Query Recommender
+
+Bonus B adds an interactive query recommendation flow. At any point in a
+session, ask the agent what to query next and it will propose a follow-up
+based on your conversation history and user profile — without executing
+anything immediately.
+
+### How it works
+
+1. **Suggest** — ask "What should I query next?" (or similar). The agent
+   inspects your session history and profile topic counts, picks the most
+   relevant topic you have not yet fully explored, and proposes a specific
+   query in plain English.
+2. **Refine** — reply with feedback like "I'd rather see a summary instead"
+   or "make it about SHIPPING". The agent updates the proposal without
+   executing it.
+3. **Confirm** — reply "yes", "do it", "go ahead", or any short affirmative.
+   The agent executes the suggested tool call and displays the results.
+
+If you ask a normal dataset question while a suggestion is pending, the
+pending suggestion is discarded and the question is answered normally.
+
+### Example flow
+
+```text
+You: How many refund requests did we get?
+Agent: There are 1,736 rows in the REFUND category.
+
+You: What should I query next?
+Agent: Based on your interest in refund data, you might want to see the
+       distribution of intents in the REFUND category.
+       Should I go ahead, or would you like to refine the suggestion?
+
+You: I'd rather see examples instead.
+Agent: How about showing 5 examples from the REFUND category instead?
+       Shall I go ahead?
+
+You: Yes, do it.
+Agent: [executes show_examples(category='REFUND', limit=5) and displays results]
+```
+
+### Trigger phrases
+
+The recommender is triggered by any of:
+
+```text
+What should I query next?
+What should I ask next?
+What do you suggest?
+Suggest a query
+What would you recommend?
+Surprise me
+What else can I ask?
+What else should I look at?
+```
+
+Confirmations include: `yes`, `do it`, `go ahead`, `sure`, `ok`, `sounds good`,
+`confirm`, `run it`, and similar short affirmatives.
+
+### Notes
+
+- The suggestion generator is entirely local — no extra LLM call is made to
+  produce the initial proposal. It uses your profile's `topic_counts` and the
+  current session's tool-call history to pick the most useful untried action
+  for your most-visited topic (distribution → examples → count → summary).
+- Refinement first tries a fast local regex rewrite. If the feedback is
+  open-ended, the existing Llama model is called to interpret it.
+- The pending suggestion is stored in the LangGraph checkpoint, so it
+  persists if you restart the CLI with the same `--session`.
+
 ## Task 1 Test Prompts
 
 ```text

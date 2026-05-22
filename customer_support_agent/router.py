@@ -9,7 +9,7 @@ from typing import Literal
 from pydantic import BaseModel
 
 
-Route = Literal["structured", "unstructured", "profile", "profile_update", "session_memory", "out_of_scope"]
+Route = Literal["structured", "unstructured", "profile", "profile_update", "session_memory", "recommend", "confirm", "refine", "out_of_scope"]
 
 
 class RouteDecision(BaseModel):
@@ -143,10 +143,49 @@ SESSION_MEMORY_TERMS = {
     "conversation so far",
 }
 
+RECOMMEND_TERMS = {
+    "what should i query next",
+    "what should i ask next",
+    "what do you suggest",
+    "suggest a query",
+    "suggest a question",
+    "suggest something",
+    "what would you recommend",
+    "recommend a query",
+    "recommend a question",
+    "surprise me",
+    "what else can i ask",
+    "what else should i look at",
+    "what else should i query",
+    "what should i look at next",
+}
+
+CONFIRM_TERMS = {
+    "yes",
+    "yes do it",
+    "do it",
+    "go ahead",
+    "execute it",
+    "run it",
+    "confirm",
+    "sounds good",
+    "let's do it",
+    "lets do it",
+    "yeah",
+    "yep",
+    "ok",
+    "okay",
+    "sure",
+}
+
 
 @lru_cache(maxsize=256)
-def route_query(query: str) -> RouteDecision:
+def route_query(query: str, has_pending_suggestion: bool = False) -> RouteDecision:
     """Classify a user query before tool selection.
+
+    ``has_pending_suggestion`` should be True when the graph currently holds a
+    pending Bonus B recommendation.  This allows short affirmative replies like
+    "yes" or "do it" to route to ``confirm`` instead of ``out_of_scope``.
 
     Results are cached: ``route_query`` is pure (same input → same output), so
     repeated calls with the same query string — which is common when
@@ -154,7 +193,7 @@ def route_query(query: str) -> RouteDecision:
     first classification.
     """
 
-    lowered = query.casefold()
+    lowered = query.casefold().strip()
     has_dataset_term = any(term in lowered for term in DATASET_TERMS)
     has_structured_term = any(term in lowered for term in STRUCTURED_TERMS)
     has_unstructured_term = any(term in lowered for term in UNSTRUCTURED_TERMS)
@@ -187,6 +226,21 @@ def route_query(query: str) -> RouteDecision:
 
     if any(hint in lowered for hint in OUT_OF_SCOPE_HINTS):
         return RouteDecision(route="out_of_scope", reason="The question asks for non-dataset knowledge.")
+
+    if any(term in lowered for term in RECOMMEND_TERMS):
+        return RouteDecision(route="recommend", reason="The user is asking for a query suggestion.")
+
+    # confirm and refine take priority over normal dataset routing when a
+    # suggestion is pending — the user is responding to the agent's proposal,
+    # not starting a fresh dataset question.
+    if has_pending_suggestion:
+        if lowered in CONFIRM_TERMS or any(lowered == term for term in CONFIRM_TERMS):
+            return RouteDecision(route="confirm", reason="The user confirmed the pending suggestion.")
+        # Any reply that does not contain a dataset term is treated as refinement.
+        # Replies that DO contain a dataset term are allowed to proceed as normal
+        # dataset questions (the user changed their mind entirely).
+        if not has_dataset_term:
+            return RouteDecision(route="refine", reason="The user is refining the pending suggestion.")
 
     if has_unstructured_term and has_dataset_term:
         return RouteDecision(route="unstructured", reason="The question asks for a qualitative dataset summary.")

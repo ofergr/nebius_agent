@@ -27,7 +27,8 @@ class UserProfile:
 
 TOPIC_KEYWORDS = {
     "refund": ("refund", "refunds", "money back", "reimbursement", "compensation", "return"),
-    "shipping": ("shipping", "shipment", "delivery", "package", "track"),
+    "delivery": ("delivery", "deliveries", "delivered", "dispatch", "delay", "delayed", "late"),
+    "shipping": ("shipping", "shipment", "package", "track", "tracking", "lost package"),
     "account": ("account", "login", "log in", "sign in", "password"),
     "order": ("order", "purchase", "cancel order"),
     "billing": ("billing", "invoice", "payment", "charged", "fee"),

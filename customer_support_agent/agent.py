@@ -16,6 +16,7 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 
 from customer_support_agent.config import Settings, get_settings
+from customer_support_agent.recommender import build_suggestion, extract_category_hint, refine_suggestion
 from customer_support_agent.profile import (
     _extract_topics,
     load_user_profile,
@@ -38,6 +39,9 @@ class AgentState(TypedDict):
     route: str
     route_reason: str
     profile_context: str
+    # Bonus B: holds a proposed tool call while waiting for user confirmation.
+    # None means no suggestion is pending.  Keys: tool, args, description.
+    pending_suggestion: dict | None
 
 
 DEFAULT_SESSION_ID = "default"
@@ -233,7 +237,8 @@ def _router_node(state: AgentState) -> dict[str, str | list[AIMessage]]:
         None,
     )
     query = last_user_message.content if last_user_message else ""
-    decision = route_query(str(query))
+    has_pending = bool(state.get("pending_suggestion"))
+    decision = route_query(str(query), has_pending_suggestion=has_pending)
     if decision.route == "out_of_scope":
         return {
             "route": decision.route,
@@ -259,6 +264,12 @@ def _next_after_router(state: AgentState) -> str:
         return "profile_update"
     if state["route"] == "session_memory":
         return "session_memory"
+    if state["route"] == "recommend":
+        return "recommend"
+    if state["route"] == "confirm":
+        return "confirm"
+    if state["route"] == "refine":
+        return "refine"
     return "agent"
 
 
@@ -276,7 +287,8 @@ def build_graph(
         return cached_graph
 
     dataset_tools = get_dataset_tools(use_mcp=use_mcp, mcp_server_url=mcp_server_url)
-    llm = build_llm(settings).bind_tools(dataset_tools)
+    base_llm = build_llm(settings)          # unbound — for confirm/refine formatting
+    llm = base_llm.bind_tools(dataset_tools) # tool-bound — for the ReAct agent node
     tool_node = ToolNode(dataset_tools)
 
     def agent_node(state: AgentState) -> dict[str, list[BaseMessage]]:
@@ -344,12 +356,134 @@ def build_graph(
 
         return {"messages": [AIMessage(content=answer)]}
 
+    def recommend_node(state: AgentState) -> dict:
+        """Propose a follow-up query without executing it."""
+        from customer_support_agent.profile import UserProfile, _extract_topics
+        from collections import Counter as _Counter
+
+        # Check whether the user named a category explicitly in their request
+        # (e.g. "suggest a question about REFUND").
+        last_human = next(
+            (str(m.content) for m in reversed(state["messages"]) if isinstance(m, HumanMessage)),
+            "",
+        )
+        category_hint = extract_category_hint(last_human)
+
+        # Build a lightweight profile stub from whatever topic context we have.
+        stub_profile = UserProfile(user_id="__stub__")
+        for msg in state["messages"]:
+            if isinstance(msg, HumanMessage):
+                stub_profile.topic_counts = dict(
+                    _Counter(stub_profile.topic_counts) + _extract_topics(str(msg.content))
+                )
+
+        suggestion = build_suggestion(stub_profile, state["messages"], category_hint=category_hint)
+        if suggestion is None:
+            return {
+                "pending_suggestion": None,
+                "messages": [
+                    AIMessage(
+                        content=(
+                            "I don't have enough context yet to suggest a useful next query. "
+                            "Try asking about a specific category like REFUND or SHIPPING first."
+                        )
+                    )
+                ],
+            }
+
+        reply = (
+            f"{suggestion['description']}\n\n"
+            f"Should I go ahead, or would you like to refine the suggestion?"
+        )
+        return {
+            "pending_suggestion": suggestion,
+            "messages": [AIMessage(content=reply)],
+        }
+
+    def refine_node(state: AgentState) -> dict:
+        """Use the LLM to interpret free-text refinement and update the suggestion."""
+        current = state.get("pending_suggestion") or {}
+        last_human = next(
+            (str(m.content) for m in reversed(state["messages"]) if isinstance(m, HumanMessage)),
+            "",
+        )
+
+        # First try the local heuristic — fast and free.
+        updated = refine_suggestion(current, last_human)
+
+        # If the local rewrite changed something, use it directly.
+        if updated != current:
+            reply = f"{updated['description']}\n\nShall I go ahead?"
+            return {"pending_suggestion": updated, "messages": [AIMessage(content=reply)]}
+
+        # Otherwise fall back to the LLM for genuinely open-ended refinement.
+        refine_prompt = (
+            f"The user was shown this query suggestion:\n\"{current.get('description', '')}\"\n\n"
+            f"They replied: \"{last_human}\"\n\n"
+            f"Produce a revised one-sentence suggestion that incorporates their feedback. "
+            f"The suggestion must describe a query against the Bitext customer support dataset "
+            f"and end with 'Shall I go ahead?'. Do not execute any tools."
+        )
+        messages = [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=refine_prompt)]
+        response = base_llm.invoke(messages)
+        refined_description = str(response.content).strip()
+
+        # Carry forward the same tool/args, just update the description.
+        updated = {**current, "description": refined_description.replace("Shall I go ahead?", "").strip()}
+        reply = f"{updated['description']}\n\nShall I go ahead?"
+        return {"pending_suggestion": updated, "messages": [AIMessage(content=reply)]}
+
+    def confirm_node(state: AgentState) -> dict:
+        """Execute the pending suggestion and clear it."""
+        suggestion = state.get("pending_suggestion")
+        if not suggestion:
+            return {
+                "pending_suggestion": None,
+                "messages": [AIMessage(content="There is no pending suggestion to execute.")],
+            }
+
+        tool_name = suggestion["tool"]
+        args = suggestion["args"]
+
+        # Find and call the matching tool directly.
+        matching = next((t for t in dataset_tools if t.name == tool_name), None)
+        if matching is None:
+            return {
+                "pending_suggestion": None,
+                "messages": [
+                    AIMessage(content=f"I couldn't find the tool '{tool_name}' to execute.")
+                ],
+            }
+
+        try:
+            result = matching.invoke(args)
+        except Exception as exc:
+            return {
+                "pending_suggestion": None,
+                "messages": [AIMessage(content=f"The tool call failed: {exc}")],
+            }
+
+        # Hand the result to the LLM to produce a readable answer.
+        format_prompt = (
+            f"Here is the result of {tool_name}({args}):\n{result}\n\n"
+            f"Write a concise, readable answer for the user based on this data."
+        )
+        messages = [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=format_prompt)]
+        response = base_llm.invoke(messages)
+        return {
+            "pending_suggestion": None,
+            "messages": [AIMessage(content=str(response.content))],
+        }
+
     graph = StateGraph(AgentState)
     graph.add_node("router", _router_node)
     graph.add_node("agent", agent_node)
     graph.add_node("profile", profile_node)
     graph.add_node("profile_update", profile_update_node)
     graph.add_node("session_memory", session_memory_node)
+    graph.add_node("recommend", recommend_node)
+    graph.add_node("refine", refine_node)
+    graph.add_node("confirm", confirm_node)
     graph.add_node("tools", tool_node)
     graph.set_entry_point("router")
     graph.add_conditional_edges(
@@ -360,6 +494,9 @@ def build_graph(
             "profile": "profile",
             "profile_update": "profile_update",
             "session_memory": "session_memory",
+            "recommend": "recommend",
+            "refine": "refine",
+            "confirm": "confirm",
             END: END,
         },
     )
@@ -368,6 +505,9 @@ def build_graph(
     graph.add_edge("profile", END)
     graph.add_edge("profile_update", END)
     graph.add_edge("session_memory", END)
+    graph.add_edge("recommend", END)
+    graph.add_edge("refine", END)
+    graph.add_edge("confirm", END)
     compiled = graph.compile(checkpointer=get_checkpointer(settings))
     _GRAPH_CACHE[cache_key] = compiled
     return compiled
@@ -387,7 +527,14 @@ def invoke_agent(
     graph = build_graph(settings, use_mcp=use_mcp, mcp_server_url=mcp_server_url)
     session_id = _normalize_session_id(session_id)
     user_id = normalize_user_id(user_id or session_id)
-    route_decision = route_query(question)
+
+    # Peek at the checkpoint to detect whether a suggestion is pending,
+    # so the router receives the correct has_pending_suggestion flag.
+    checkpoint = graph.get_state(config={"configurable": {"thread_id": session_id}})
+    has_pending = bool(
+        checkpoint and checkpoint.values and checkpoint.values.get("pending_suggestion")
+    )
+    route_decision = route_query(question, has_pending_suggestion=has_pending)
 
     def latest_topic_context(messages: list[BaseMessage]) -> str | None:
         for message in reversed(messages):
@@ -433,6 +580,6 @@ def invoke_agent(
             )
         ]
     topic_context = latest_topic_context(result["messages"])
-    if route_decision.route not in {"profile", "profile_update"}:
+    if route_decision.route not in {"profile", "profile_update", "recommend", "confirm", "refine"}:
         update_user_profile(user_id, question, settings, topic_context=topic_context)
     return result["messages"]
