@@ -107,3 +107,14 @@ def test_topic_counts_inherit_context_for_generic_followups(tmp_path) -> None:
     profile = load_user_profile("ofer", settings)
 
     assert profile.topic_counts["refund"] == 3
+
+
+def test_feedback_does_not_increment_billing_via_fee_substring(tmp_path) -> None:
+    settings = _settings(tmp_path)
+
+    update_user_profile("ofer", "Summarize the FEEDBACK category", settings)
+
+    profile = load_user_profile("ofer", settings)
+
+    assert profile.topic_counts["feedback"] == 1
+    assert profile.topic_counts.get("billing", 0) == 0

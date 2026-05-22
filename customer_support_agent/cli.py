@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 from collections.abc import Iterable
 
-from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 
 from customer_support_agent.agent import invoke_agent, reset_checkpoint_db
 from customer_support_agent.profile import normalize_user_id
@@ -28,14 +27,6 @@ def _final_answer(messages: list[BaseMessage]) -> str:
     return "I could not produce a final answer."
 
 
-def _message_signature(message: BaseMessage) -> str:
-    if isinstance(message, ToolMessage):
-        return f"tool|{message.name}|{message.tool_call_id}|{message.content}"
-    if isinstance(message, AIMessage):
-        return f"ai|{message.content}|{message.tool_calls}"
-    return f"{type(message).__name__}|{message.content}"
-
-
 def _new_messages_for_turn(messages: list[BaseMessage]) -> list[BaseMessage]:
     """Return only the messages produced in the current user turn.
 
@@ -45,7 +36,7 @@ def _new_messages_for_turn(messages: list[BaseMessage]) -> list[BaseMessage]:
 
     last_human_index = None
     for index in range(len(messages) - 1, -1, -1):
-        if messages[index].type == "human":
+        if isinstance(messages[index], HumanMessage):
             last_human_index = index
             break
 

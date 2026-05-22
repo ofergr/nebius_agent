@@ -26,7 +26,7 @@ class UserProfile:
 
 
 TOPIC_KEYWORDS = {
-    "refund": ("refund", "money back", "reimbursement", "compensation", "return"),
+    "refund": ("refund", "refunds", "money back", "reimbursement", "compensation", "return"),
     "shipping": ("shipping", "shipment", "delivery", "package", "track"),
     "account": ("account", "login", "log in", "sign in", "password"),
     "order": ("order", "purchase", "cancel order"),
@@ -181,7 +181,7 @@ def _extract_topics(text: str) -> Counter[str]:
     lowered = text.casefold()
     counts: Counter[str] = Counter()
     for topic, keywords in TOPIC_KEYWORDS.items():
-        if any(keyword in lowered for keyword in keywords):
+        if any(re.search(rf"\b{re.escape(keyword.casefold())}\b", lowered) for keyword in keywords):
             counts[topic] += 1
     return counts
 
