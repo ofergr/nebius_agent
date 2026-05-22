@@ -16,6 +16,16 @@ from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 
 from customer_support_agent.config import Settings, get_settings
+from customer_support_agent.profile import (
+    load_user_profile,
+    message_has_profile_update,
+    normalize_user_id,
+    render_profile_answer,
+    render_profile_update_acknowledgement,
+    render_profile_summary,
+    reset_user_profiles,
+    update_user_profile,
+)
 from customer_support_agent.router import route_query
 from customer_support_agent.tools import DATASET_TOOLS
 
@@ -26,6 +36,7 @@ class AgentState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
     route: str
     route_reason: str
+    profile_context: str
 
 
 DEFAULT_SESSION_ID = "default"
@@ -52,6 +63,10 @@ Use prior turns from the same session to resolve follow-up requests. For request
 "show 3 more", continue the same example set with the correct next offset. For requests
 like "what about refunds?" or "what is the total count of the last two?", reuse the
 relevant earlier counts, filters, and results from the conversation history.
+
+If a user profile is provided, use it only as distilled long-term context such as the
+user's name, preferences, or frequent interests. Do not treat it as a replay of the
+whole conversation.
 
 After a tool returns a valid observation, produce the final answer from that observation
 unless another different tool call is clearly required. Do not repeat the same tool call
@@ -184,15 +199,16 @@ def reset_runtime_caches() -> None:
     _CHECKPOINTER_CONNECTIONS.clear()
 
 
-def reset_checkpoint_db(settings: Settings | None = None) -> str:
-    """Delete the checkpoint database file and clear cached connections."""
+def reset_checkpoint_db(settings: Settings | None = None) -> tuple[str, str]:
+    """Delete both persistent memory stores and clear cached connections."""
 
     settings = settings or get_settings()
     path = _checkpoint_path(settings)
     reset_runtime_caches()
     if os.path.exists(path):
         os.remove(path)
-    return path
+    profile_dir = reset_user_profiles(settings)
+    return path, profile_dir
 
 
 def _router_node(state: AgentState) -> dict[str, str | list[AIMessage]]:
@@ -219,7 +235,15 @@ def _router_node(state: AgentState) -> dict[str, str | list[AIMessage]]:
 
 
 def _next_after_router(state: AgentState) -> str:
-    return END if state["route"] == "out_of_scope" else "agent"
+    if state["route"] == "out_of_scope":
+        return END
+    if state["route"] == "profile":
+        return "profile"
+    if state["route"] == "profile_update":
+        return "profile_update"
+    if state["route"] == "session_memory":
+        return "session_memory"
+    return "agent"
 
 
 def build_graph(settings: Settings | None = None):
@@ -255,17 +279,60 @@ def build_graph(settings: Settings | None = None):
             f"Router reason: {state['route_reason']}."
         )
         messages = [SystemMessage(content=SYSTEM_PROMPT), SystemMessage(content=route_context)]
+        if state.get("profile_context"):
+            messages.append(SystemMessage(content=f"Known user profile:\n{state['profile_context']}"))
         messages.extend(state["messages"])
         return {"messages": [llm.invoke(messages)]}
+
+    def profile_node(state: AgentState) -> dict[str, list[BaseMessage]]:
+        return {"messages": [AIMessage(content=state["profile_context"])]}
+
+    def profile_update_node(state: AgentState) -> dict[str, list[BaseMessage]]:
+        return {"messages": [AIMessage(content=state["profile_context"])]}
+
+    def session_memory_node(state: AgentState) -> dict[str, list[BaseMessage]]:
+        human_messages = [
+            str(message.content)
+            for message in state["messages"]
+            if isinstance(message, HumanMessage)
+        ]
+        if human_messages:
+            human_messages = human_messages[:-1]
+
+        if not human_messages:
+            answer = "This is the first question in the current session, so there is no earlier conversation to summarize yet."
+        else:
+            answer_lines = ["So far in this session, you asked:"]
+            for index, question in enumerate(human_messages, start=1):
+                answer_lines.append(f"{index}. {question}")
+            answer = "\n".join(answer_lines)
+
+        return {"messages": [AIMessage(content=answer)]}
 
     graph = StateGraph(AgentState)
     graph.add_node("router", _router_node)
     graph.add_node("agent", agent_node)
+    graph.add_node("profile", profile_node)
+    graph.add_node("profile_update", profile_update_node)
+    graph.add_node("session_memory", session_memory_node)
     graph.add_node("tools", tool_node)
     graph.set_entry_point("router")
-    graph.add_conditional_edges("router", _next_after_router, {"agent": "agent", END: END})
+    graph.add_conditional_edges(
+        "router",
+        _next_after_router,
+        {
+            "agent": "agent",
+            "profile": "profile",
+            "profile_update": "profile_update",
+            "session_memory": "session_memory",
+            END: END,
+        },
+    )
     graph.add_conditional_edges("agent", tools_condition)
     graph.add_edge("tools", "agent")
+    graph.add_edge("profile", END)
+    graph.add_edge("profile_update", END)
+    graph.add_edge("session_memory", END)
     compiled = graph.compile(checkpointer=get_checkpointer(settings))
     _GRAPH_CACHE[settings] = compiled
     return compiled
@@ -275,18 +342,45 @@ def invoke_agent(
     question: str,
     settings: Settings | None = None,
     session_id: str | None = None,
+    user_id: str | None = None,
 ) -> list[BaseMessage]:
     """Run the graph once and return all emitted messages."""
 
     settings = settings or get_settings()
     graph = build_graph(settings)
     session_id = _normalize_session_id(session_id)
+    user_id = normalize_user_id(user_id or session_id)
+    route_decision = route_query(question)
+
+    def latest_topic_context(messages: list[BaseMessage]) -> str | None:
+        for message in reversed(messages):
+            if not isinstance(message, HumanMessage):
+                continue
+            content = str(message.content)
+            if content == question:
+                continue
+            if route_query(content).route in {"structured", "unstructured"}:
+                return content
+        return None
+
+    if route_decision.route == "profile_update":
+        profile = update_user_profile(user_id, question, settings)
+        profile_context = render_profile_update_acknowledgement(profile)
+    else:
+        profile = load_user_profile(user_id, settings)
+        profile_context = render_profile_answer(profile)
+        if profile.facts or profile.name or profile.preferences or profile.topic_counts:
+            profile_context = render_profile_summary(profile)
+
     # LangGraph's recursion_limit counts graph node executions, not full ReAct
     # iterations. Each tool cycle usually costs agent -> tools -> agent steps.
     graph_step_limit = settings.max_iterations * 2 + 4
     try:
         result = graph.invoke(
-            {"messages": [HumanMessage(content=question)]},
+            {
+                "messages": [HumanMessage(content=question)],
+                "profile_context": profile_context,
+            },
             config={
                 "recursion_limit": graph_step_limit,
                 "configurable": {"thread_id": session_id},
@@ -301,4 +395,9 @@ def invoke_agent(
                 )
             )
         ]
+    topic_context = latest_topic_context(result["messages"])
+    if route_decision.route not in {"profile", "profile_update"} and message_has_profile_update(question):
+        update_user_profile(user_id, question, settings, topic_context=topic_context)
+    elif route_decision.route not in {"profile", "profile_update"}:
+        update_user_profile(user_id, question, settings, topic_context=topic_context)
     return result["messages"]

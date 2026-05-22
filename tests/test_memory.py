@@ -75,6 +75,7 @@ def _settings(tmp_path) -> Settings:
         dataset_split="train",
         max_iterations=12,
         checkpoint_db_path=str(tmp_path / "memory.sqlite"),
+        user_profile_dir=str(tmp_path / "profiles"),
     )
 
 

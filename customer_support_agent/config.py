@@ -22,6 +22,7 @@ class Settings:
     dataset_split: str
     max_iterations: int
     checkpoint_db_path: str
+    user_profile_dir: str
 
 
 def get_settings() -> Settings:
@@ -39,4 +40,5 @@ def get_settings() -> Settings:
         # multiple LangGraph node steps, so agent.py translates this value.
         max_iterations=int(os.getenv("MAX_ITERATIONS", "12")),
         checkpoint_db_path=os.getenv("CHECKPOINT_DB_PATH", ".langgraph_checkpoints.sqlite"),
+        user_profile_dir=os.getenv("USER_PROFILE_DIR", ".user_profiles"),
     )

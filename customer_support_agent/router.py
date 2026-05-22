@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import re
 from typing import Literal
 
 from pydantic import BaseModel
 
 
-Route = Literal["structured", "unstructured", "out_of_scope"]
+Route = Literal["structured", "unstructured", "profile", "profile_update", "session_memory", "out_of_scope"]
 
 
 class RouteDecision(BaseModel):
@@ -86,8 +87,10 @@ STRUCTURED_TERMS = {
     "difference",
     "distribution",
     "exist",
+    "example",
     "examples",
     "filter",
+    "give me",
     "how many",
     "least common",
     "list",
@@ -121,6 +124,24 @@ OUT_OF_SCOPE_HINTS = {
     "stock price",
 }
 
+PROFILE_TERMS = {
+    "what do you remember about me",
+    "what do you know about me",
+    "my profile",
+    "my preferences",
+    "remember about me",
+}
+
+SESSION_MEMORY_TERMS = {
+    "what questions did i ask",
+    "which questions did i ask",
+    "what have i asked",
+    "what did i ask so far",
+    "what did we talk about",
+    "summarize our conversation",
+    "conversation so far",
+}
+
 
 def route_query(query: str) -> RouteDecision:
     """Classify a user query before tool selection."""
@@ -129,6 +150,32 @@ def route_query(query: str) -> RouteDecision:
     has_dataset_term = any(term in lowered for term in DATASET_TERMS)
     has_structured_term = any(term in lowered for term in STRUCTURED_TERMS)
     has_unstructured_term = any(term in lowered for term in UNSTRUCTURED_TERMS)
+
+    if any(term in lowered for term in PROFILE_TERMS):
+        return RouteDecision(route="profile", reason="The question asks about the saved user profile.")
+
+    if re.search(r"what do you (know|remember) about\b", lowered) and not has_dataset_term:
+        return RouteDecision(
+            route="profile",
+            reason="The question appears to ask about the user profile or stored personal context.",
+        )
+
+    if (
+        any(term in lowered for term in ("my name is", "call me", "years old", "i prefer", "please use"))
+        and not has_dataset_term
+        and not has_structured_term
+        and not has_unstructured_term
+    ):
+        return RouteDecision(
+            route="profile_update",
+            reason="The message appears to provide personal profile information without a dataset question.",
+        )
+
+    if any(term in lowered for term in SESSION_MEMORY_TERMS):
+        return RouteDecision(
+            route="session_memory",
+            reason="The question asks about the current conversation history.",
+        )
 
     if any(hint in lowered for hint in OUT_OF_SCOPE_HINTS):
         return RouteDecision(route="out_of_scope", reason="The question asks for non-dataset knowledge.")

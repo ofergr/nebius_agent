@@ -17,6 +17,8 @@ Edit `.env` and set `NEBIUS_API_KEY` to your Nebius Token Factory API key.
 You can optionally set `CHECKPOINT_DB_PATH` to choose where persistent LangGraph
 session checkpoints are stored. By default the app writes `.langgraph_checkpoints.sqlite`
 in the project directory.
+You can also set `USER_PROFILE_DIR` to choose where per-user semantic profiles are stored.
+By default the app writes `.user_profiles/` in the project directory.
 
 The dataset is loaded at runtime from Hugging Face:
 
@@ -45,13 +47,27 @@ python main.py --once "Show me 3 examples from the REFUND category" --session my
 python main.py --once "Show me 3 more" --session my_session
 ```
 
+Persist a separate user profile across sessions:
+
+```bash
+python main.py --session work_1 --user alice
+python main.py --once "My name is Alice and I prefer concise answers." --user alice
+python main.py --once "What do you remember about me?" --user alice
+python main.py --session work_2 --user alice
+```
+
 Start fresh with an empty checkpoint database:
 
 ```bash
 python main.py --reset-db
 ```
 
-This deletes the SQLite checkpoint file configured by `CHECKPOINT_DB_PATH` and clears all saved sessions.
+This deletes both persistent memory stores:
+
+- the SQLite checkpoint file configured by `CHECKPOINT_DB_PATH`
+- the user profile directory configured by `USER_PROFILE_DIR`
+
+That gives you a genuinely fresh start for both Task 2a and Task 2b memory.
 
 The CLI prints tool calls and observations before the final answer.
 
@@ -65,6 +81,21 @@ Task 1 is implemented as a LangGraph ReAct graph:
 - Max iterations are controlled by `MAX_ITERATIONS`, defaulting to `12`.
 - Task 2a adds a SQLite-backed LangGraph `SqliteSaver` checkpointer, keyed by `--session`,
   so conversation history persists across turns and restarts.
+- Task 2b adds a separate per-user semantic profile store, keyed by `--user`, for distilled
+  facts, preferences, and frequent topics across sessions.
+
+## Memory Design Note
+
+The assignment does not define an exact relationship between session memory and user memory,
+so this project makes the following architectural choice:
+
+- Episodic conversation memory is keyed by `--session`.
+- Long-term semantic profile memory is keyed by `--user`.
+- If multiple users reuse the same `--session`, they intentionally share the same session
+  history, while still keeping separate long-term profiles.
+
+This keeps Task 2a and Task 2b conceptually separate: session checkpoints store the
+conversation thread, while user profiles store distilled facts about a person.
 
 Out-of-scope requests are declined before the model can answer from general knowledge.
 
