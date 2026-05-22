@@ -21,6 +21,7 @@ class Settings:
     dataset_name: str
     dataset_split: str
     max_iterations: int
+    checkpoint_db_path: str
 
 
 def get_settings() -> Settings:
@@ -37,4 +38,5 @@ def get_settings() -> Settings:
         # Assignment-level ReAct loop budget. One logical iteration may include
         # multiple LangGraph node steps, so agent.py translates this value.
         max_iterations=int(os.getenv("MAX_ITERATIONS", "12")),
+        checkpoint_db_path=os.getenv("CHECKPOINT_DB_PATH", ".langgraph_checkpoints.sqlite"),
     )

@@ -14,6 +14,9 @@ cp .env.example .env
 ```
 
 Edit `.env` and set `NEBIUS_API_KEY` to your Nebius Token Factory API key.
+You can optionally set `CHECKPOINT_DB_PATH` to choose where persistent LangGraph
+session checkpoints are stored. By default the app writes `.langgraph_checkpoints.sqlite`
+in the project directory.
 
 The dataset is loaded at runtime from Hugging Face:
 
@@ -34,6 +37,22 @@ Ask one question and exit:
 python main.py --once "What categories exist in the dataset?"
 ```
 
+Resume the same conversation across restarts:
+
+```bash
+python main.py --session my_session
+python main.py --once "Show me 3 examples from the REFUND category" --session my_session
+python main.py --once "Show me 3 more" --session my_session
+```
+
+Start fresh with an empty checkpoint database:
+
+```bash
+python main.py --reset-db
+```
+
+This deletes the SQLite checkpoint file configured by `CHECKPOINT_DB_PATH` and clears all saved sessions.
+
 The CLI prints tool calls and observations before the final answer.
 
 ## Architecture
@@ -44,6 +63,8 @@ Task 1 is implemented as a LangGraph ReAct graph:
 - `agent`: Nebius-hosted chat model bound to dataset analysis tools.
 - `tools`: LangGraph `ToolNode` that executes Pydantic-typed tools.
 - Max iterations are controlled by `MAX_ITERATIONS`, defaulting to `12`.
+- Task 2a adds a SQLite-backed LangGraph `SqliteSaver` checkpointer, keyed by `--session`,
+  so conversation history persists across turns and restarts.
 
 Out-of-scope requests are declined before the model can answer from general knowledge.
 

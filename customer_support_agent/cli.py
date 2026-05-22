@@ -7,7 +7,7 @@ from collections.abc import Iterable
 
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 
-from customer_support_agent.agent import invoke_agent
+from customer_support_agent.agent import invoke_agent, reset_checkpoint_db
 
 
 def _print_reasoning(messages: Iterable[BaseMessage]) -> None:
@@ -31,15 +31,31 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="Customer support dataset analyst agent")
     parser.add_argument("--once", help="Ask one question and exit.")
+    parser.add_argument(
+        "--session",
+        default="default",
+        help="Persistent session ID for restoring the same conversation across turns and restarts.",
+    )
+    parser.add_argument(
+        "--reset-db",
+        action="store_true",
+        help="Delete the persistent LangGraph checkpoint database and exit.",
+    )
     args = parser.parse_args()
 
+    if args.reset_db:
+        path = reset_checkpoint_db()
+        print(f"Reset checkpoint database: {path}")
+        return
+
     if args.once:
-        messages = invoke_agent(args.once)
+        messages = invoke_agent(args.once, session_id=args.session)
         _print_reasoning(messages)
         print(f"\nAssistant: {_final_answer(messages)}")
         return
 
     print("Customer Support Data Analyst Agent")
+    print(f"Session: {args.session}")
     print("Type 'exit' or 'quit' to stop.")
     while True:
         question = input("\nYou: ").strip()
@@ -47,6 +63,6 @@ def main() -> None:
             break
         if not question:
             continue
-        messages = invoke_agent(question)
+        messages = invoke_agent(question, session_id=args.session)
         _print_reasoning(messages)
         print(f"\nAssistant: {_final_answer(messages)}")

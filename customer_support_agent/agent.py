@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 import json
+import os
+import sqlite3
 from typing import Annotated, TypedDict
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
+from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
-from langgraph.errors import GraphRecursionError
 
 from customer_support_agent.config import Settings, get_settings
-from customer_support_agent.router import RouteDecision, route_query
+from customer_support_agent.router import route_query
 from customer_support_agent.tools import DATASET_TOOLS
 
 
@@ -23,6 +26,9 @@ class AgentState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
     route: str
     route_reason: str
+
+
+DEFAULT_SESSION_ID = "default"
 
 
 SYSTEM_PROMPT = """You are a data analyst agent for the Bitext customer support dataset.
@@ -42,10 +48,20 @@ When the user asks to compare categories, intents, or groups, the final answer m
 explicitly describe each side of the comparison and then state the overlap or key
 difference. Prefer concrete counts and names over vague wording.
 
+Use prior turns from the same session to resolve follow-up requests. For requests like
+"show 3 more", continue the same example set with the correct next offset. For requests
+like "what about refunds?" or "what is the total count of the last two?", reuse the
+relevant earlier counts, filters, and results from the conversation history.
+
 After a tool returns a valid observation, produce the final answer from that observation
 unless another different tool call is clearly required. Do not repeat the same tool call
 with the same arguments after it has returned data.
 """
+
+
+_CHECKPOINTERS: dict[str, SqliteSaver] = {}
+_CHECKPOINTER_CONNECTIONS: dict[str, sqlite3.Connection] = {}
+_GRAPH_CACHE: dict[Settings, object] = {}
 
 
 def _tool_call_signature(message: BaseMessage | None) -> tuple[str, str] | None:
@@ -132,6 +148,53 @@ def build_llm(settings: Settings | None = None) -> ChatOpenAI:
     )
 
 
+def _normalize_session_id(session_id: str | None) -> str:
+    if session_id is None:
+        return DEFAULT_SESSION_ID
+    stripped = session_id.strip().casefold()
+    return stripped or DEFAULT_SESSION_ID
+
+
+def _checkpoint_path(settings: Settings) -> str:
+    return os.path.abspath(settings.checkpoint_db_path)
+
+
+def get_checkpointer(settings: Settings | None = None) -> SqliteSaver:
+    """Return a reusable SQLite-backed LangGraph checkpointer."""
+
+    settings = settings or get_settings()
+    path = _checkpoint_path(settings)
+    if path not in _CHECKPOINTERS:
+        connection = sqlite3.connect(path, check_same_thread=False)
+        _CHECKPOINTER_CONNECTIONS[path] = connection
+        _CHECKPOINTERS[path] = SqliteSaver(connection)
+    return _CHECKPOINTERS[path]
+
+
+def reset_runtime_caches() -> None:
+    """Clear cached graphs and close checkpoint connections.
+
+    This is mainly useful in tests to simulate an application restart.
+    """
+
+    _GRAPH_CACHE.clear()
+    _CHECKPOINTERS.clear()
+    for connection in _CHECKPOINTER_CONNECTIONS.values():
+        connection.close()
+    _CHECKPOINTER_CONNECTIONS.clear()
+
+
+def reset_checkpoint_db(settings: Settings | None = None) -> str:
+    """Delete the checkpoint database file and clear cached connections."""
+
+    settings = settings or get_settings()
+    path = _checkpoint_path(settings)
+    reset_runtime_caches()
+    if os.path.exists(path):
+        os.remove(path)
+    return path
+
+
 def _router_node(state: AgentState) -> dict[str, str | list[AIMessage]]:
     last_user_message = next(
         (message for message in reversed(state["messages"]) if isinstance(message, HumanMessage)),
@@ -161,6 +224,11 @@ def _next_after_router(state: AgentState) -> str:
 
 def build_graph(settings: Settings | None = None):
     """Compile the LangGraph ReAct graph used by the CLI."""
+
+    settings = settings or get_settings()
+    cached_graph = _GRAPH_CACHE.get(settings)
+    if cached_graph is not None:
+        return cached_graph
 
     llm = build_llm(settings).bind_tools(DATASET_TOOLS)
     tool_node = ToolNode(DATASET_TOOLS)
@@ -198,21 +266,31 @@ def build_graph(settings: Settings | None = None):
     graph.add_conditional_edges("router", _next_after_router, {"agent": "agent", END: END})
     graph.add_conditional_edges("agent", tools_condition)
     graph.add_edge("tools", "agent")
-    return graph.compile()
+    compiled = graph.compile(checkpointer=get_checkpointer(settings))
+    _GRAPH_CACHE[settings] = compiled
+    return compiled
 
 
-def invoke_agent(question: str, settings: Settings | None = None) -> list[BaseMessage]:
+def invoke_agent(
+    question: str,
+    settings: Settings | None = None,
+    session_id: str | None = None,
+) -> list[BaseMessage]:
     """Run the graph once and return all emitted messages."""
 
     settings = settings or get_settings()
     graph = build_graph(settings)
+    session_id = _normalize_session_id(session_id)
     # LangGraph's recursion_limit counts graph node executions, not full ReAct
     # iterations. Each tool cycle usually costs agent -> tools -> agent steps.
     graph_step_limit = settings.max_iterations * 2 + 4
     try:
         result = graph.invoke(
-            {"messages": [HumanMessage(content=question)], "route": "", "route_reason": ""},
-            config={"recursion_limit": graph_step_limit},
+            {"messages": [HumanMessage(content=question)]},
+            config={
+                "recursion_limit": graph_step_limit,
+                "configurable": {"thread_id": session_id},
+            },
         )
     except GraphRecursionError:
         return [
