@@ -19,6 +19,8 @@ session checkpoints are stored. By default the app writes `.langgraph_checkpoint
 in the project directory.
 You can also set `USER_PROFILE_DIR` to choose where per-user semantic profiles are stored.
 By default the app writes `.user_profiles/` in the project directory.
+For MCP mode, the client connects to `MCP_SERVER_URL`, which defaults to
+`http://127.0.0.1:8000/mcp`.
 
 The dataset is loaded at runtime from Hugging Face:
 
@@ -37,6 +39,14 @@ Ask one question and exit:
 
 ```bash
 python main.py --once "What categories exist in the dataset?"
+```
+
+Use the standalone MCP server instead of local tools:
+
+```bash
+python mcp_server.py
+python main.py --use-mcp
+python main.py --once "How many refund requests did we get?" --use-mcp
 ```
 
 Resume the same conversation across restarts:
@@ -84,6 +94,16 @@ Task 1 is implemented as a LangGraph ReAct graph:
 - Task 2b adds a separate per-user semantic profile store, keyed by `--user`, for distilled
   facts, preferences, and frequent topics across sessions.
 
+For Task 3, the tool architecture is intentionally shared between local and remote modes:
+
+- [customer_support_agent/tools.py](/Users/oferg/work/nebius/week5a/0501/nebius_agent/customer_support_agent/tools.py) contains the core dataset-analysis implementations such as `count_rows_impl` and `show_examples_impl`.
+- The normal local CLI path binds LangChain tools that call those same implementations directly in-process.
+- [mcp_server.py](/Users/oferg/work/nebius/week5a/0501/nebius_agent/mcp_server.py) exposes those same implementations as FastMCP tools, so the server and local client stay behaviorally aligned.
+- [customer_support_agent/mcp_tools.py](/Users/oferg/work/nebius/week5a/0501/nebius_agent/customer_support_agent/mcp_tools.py) provides LangChain-compatible proxy tools that call the remote MCP server over HTTP.
+- [customer_support_agent/agent.py](/Users/oferg/work/nebius/week5a/0501/nebius_agent/customer_support_agent/agent.py) chooses which tool set to bind: local tools by default, or MCP-backed proxy tools when the client is started with `--use-mcp`.
+
+This means the agent graph, routing logic, memory, and answer formatting stay the same in both modes. The main difference is only where the tool execution happens: locally inside the client process, or remotely through the MCP server.
+
 ## Memory Design Note
 
 The assignment does not define an exact relationship between session memory and user memory,
@@ -105,11 +125,11 @@ The project uses `meta-llama/Llama-3.3-70B-Instruct` through the Nebius Token Fa
 
 ## Project Decisions
 
-We chose `meta-llama/Llama-3.3-70B-Instruct` because the agent needs more than simple chat completion. Task 1 requires reliable tool selection, structured dataset analysis, qualitative summarization, multi-step reasoning, and graceful refusal for out-of-scope questions. Since tool-use quality is central to the grading rubric, we prefer a stronger instruction-following model for the initial implementation.
+I chose `meta-llama/Llama-3.3-70B-Instruct` because the agent needs more than simple chat completion. Task 1 requires reliable tool selection, structured dataset analysis, qualitative summarization, multi-step reasoning, and graceful refusal for out-of-scope questions. Since tool-use quality is central to the grading rubric, I prefer a stronger instruction-following model for the initial implementation.
 
 Most factual computation still happens in Python tools, so the model is mainly responsible for routing intent, choosing the right tools, chaining calls when needed, and writing the final answer from tool observations. The model name is configurable through `NEBIUS_MODEL`, so a smaller Nebius Token Factory model can be tested later if speed or cost becomes more important.
 
-We implemented the agent as an explicit LangGraph state graph instead of using `create_react_agent`. This gives us tighter control over the flow required by the assignment: a dedicated router node before tool use, immediate handling of out-of-scope questions, custom stopping logic for repeated empty tool calls, and clearer control over answer style for examples, summaries, and comparisons. `create_react_agent` would reduce boilerplate, but the explicit graph makes the grading-relevant behavior easier to demonstrate and debug.
+I implemented the agent as an explicit LangGraph state graph instead of using `create_react_agent`. This gives me tighter control over the flow required by the assignment: a dedicated router node before tool use, immediate handling of out-of-scope questions, custom stopping logic for repeated empty tool calls, and clearer control over answer style for examples, summaries, and comparisons. `create_react_agent` would reduce boilerplate, but the explicit graph makes the grading-relevant behavior easier to demonstrate and debug.
 
 ## Tools
 
@@ -119,6 +139,81 @@ We implemented the agent as an explicit LangGraph state graph instead of using `
 - `show_examples`: returns customer instruction and support response examples.
 - `distribution`: computes grouped counts by category, intent, or flags.
 - `sample_responses_for_summary`: gathers representative rows for qualitative summaries.
+
+## MCP Server
+
+Task 3 is implemented in [mcp_server.py](/Users/oferg/work/nebius/week5a/0501/nebius_agent/mcp_server.py) using FastMCP.
+It exposes the dataset-analysis tools as MCP tools, including:
+
+- `list_categories`
+- `list_intents`
+- `count_rows`
+- `show_examples`
+- `distribution`
+- `sample_responses_for_summary`
+
+Start the standalone server:
+
+```bash
+python mcp_server.py
+```
+
+By default it serves Streamable HTTP on:
+
+```text
+http://127.0.0.1:8000/mcp
+```
+
+You can shut the server down gracefully from another terminal with:
+
+```bash
+curl -X POST http://127.0.0.1:8000/shutdown
+```
+
+That route is local-only and schedules a graceful `SIGTERM`, so it is meant for
+local development use on your own machine.
+
+Then run the client against that server:
+
+```bash
+python main.py --use-mcp
+```
+
+There is no MCP fallback mode. Without `--use-mcp`, the client uses local in-process tools.
+
+You can also call one of the MCP tools directly with a FastMCP client:
+
+```bash
+python mcp_server.py
+```
+
+And from another terminal:
+
+```python
+import asyncio
+from fastmcp import Client
+
+async def main():
+    async with Client("http://127.0.0.1:8000/mcp") as client:
+        result = await client.call_tool("list_categories")
+        print(result.data)
+
+asyncio.run(main())
+```
+
+When the chat client runs with `--use-mcp`, its tool traces are labeled as MCP calls, and
+the standalone server also logs each MCP invocation with `[mcp tool call]` and
+`[mcp observation]` prefixes. Without `--use-mcp`, the normal CLI still uses local tool
+execution and prints the original `[tool call]` / `[observation]` prefixes.
+
+If you want to change the MCP endpoint, set these environment variables:
+
+```text
+MCP_SERVER_URL
+MCP_SERVER_HOST
+MCP_SERVER_PORT
+MCP_SERVER_PATH
+```
 
 ## Task 1 Test Prompts
 

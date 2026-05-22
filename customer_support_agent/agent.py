@@ -27,7 +27,7 @@ from customer_support_agent.profile import (
     update_user_profile,
 )
 from customer_support_agent.router import route_query
-from customer_support_agent.tools import DATASET_TOOLS
+from customer_support_agent.tools import get_dataset_tools
 
 
 class AgentState(TypedDict):
@@ -58,7 +58,10 @@ examples unless the user explicitly asked for examples.
 
 When the user asks to show, list, or give examples, the final answer must list the
 returned examples individually. Include each example's customer instruction and support
-response. Do not replace example listings with a high-level summary.
+response. Do not replace example listings with a high-level summary. When referring to
+dataset categories in the answer, prefer the exact category label from the data, such as
+CONTACT, REFUND, or SHIPPING, instead of generic paraphrases like "issue" unless the user
+explicitly used that wording.
 
 When the user asks to compare categories, intents, or groups, the final answer must
 explicitly describe each side of the comparison and then state the overlap or key
@@ -81,7 +84,7 @@ with the same arguments after it has returned data.
 
 _CHECKPOINTERS: dict[str, SqliteSaver] = {}
 _CHECKPOINTER_CONNECTIONS: dict[str, sqlite3.Connection] = {}
-_GRAPH_CACHE: dict[Settings, object] = {}
+_GRAPH_CACHE: dict[tuple[Settings, bool, str | None], object] = {}
 
 
 def _tool_call_signature(message: BaseMessage | None) -> tuple[str, str] | None:
@@ -251,16 +254,22 @@ def _next_after_router(state: AgentState) -> str:
     return "agent"
 
 
-def build_graph(settings: Settings | None = None):
+def build_graph(
+    settings: Settings | None = None,
+    use_mcp: bool = False,
+    mcp_server_url: str | None = None,
+):
     """Compile the LangGraph ReAct graph used by the CLI."""
 
     settings = settings or get_settings()
-    cached_graph = _GRAPH_CACHE.get(settings)
+    cache_key = (settings, use_mcp, mcp_server_url)
+    cached_graph = _GRAPH_CACHE.get(cache_key)
     if cached_graph is not None:
         return cached_graph
 
-    llm = build_llm(settings).bind_tools(DATASET_TOOLS)
-    tool_node = ToolNode(DATASET_TOOLS)
+    dataset_tools = get_dataset_tools(use_mcp=use_mcp, mcp_server_url=mcp_server_url)
+    llm = build_llm(settings).bind_tools(dataset_tools)
+    tool_node = ToolNode(dataset_tools)
 
     def agent_node(state: AgentState) -> dict[str, list[BaseMessage]]:
         empty_response = _empty_observation_response(state["messages"])
@@ -339,7 +348,7 @@ def build_graph(settings: Settings | None = None):
     graph.add_edge("profile_update", END)
     graph.add_edge("session_memory", END)
     compiled = graph.compile(checkpointer=get_checkpointer(settings))
-    _GRAPH_CACHE[settings] = compiled
+    _GRAPH_CACHE[cache_key] = compiled
     return compiled
 
 
@@ -348,11 +357,13 @@ def invoke_agent(
     settings: Settings | None = None,
     session_id: str | None = None,
     user_id: str | None = None,
+    use_mcp: bool = False,
+    mcp_server_url: str | None = None,
 ) -> list[BaseMessage]:
     """Run the graph once and return all emitted messages."""
 
     settings = settings or get_settings()
-    graph = build_graph(settings)
+    graph = build_graph(settings, use_mcp=use_mcp, mcp_server_url=mcp_server_url)
     session_id = _normalize_session_id(session_id)
     user_id = normalize_user_id(user_id or session_id)
     route_decision = route_query(question)
