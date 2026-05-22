@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from functools import lru_cache
 from typing import Literal
 
 from pydantic import BaseModel
@@ -143,8 +144,15 @@ SESSION_MEMORY_TERMS = {
 }
 
 
+@lru_cache(maxsize=256)
 def route_query(query: str) -> RouteDecision:
-    """Classify a user query before tool selection."""
+    """Classify a user query before tool selection.
+
+    Results are cached: ``route_query`` is pure (same input → same output), so
+    repeated calls with the same query string — which is common when
+    ``latest_topic_context`` scans conversation history — are free after the
+    first classification.
+    """
 
     lowered = query.casefold()
     has_dataset_term = any(term in lowered for term in DATASET_TERMS)

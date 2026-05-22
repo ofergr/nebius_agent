@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 from functools import lru_cache
 from typing import Annotated, Any
 
@@ -47,8 +48,30 @@ def _call_mcp_tool(
     tool_name: str,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
+    """Call an MCP tool synchronously, safe to use from both sync and async contexts.
+
+    ``asyncio.run()`` raises RuntimeError when there is already a running event
+    loop (e.g. inside Streamlit or a Jupyter notebook).  In that case we spin up
+    a fresh loop in a dedicated background thread so the caller's loop is not
+    blocked or corrupted.
+    """
     try:
-        return asyncio.run(_call_mcp_tool_async(mcp_server_url, tool_name, arguments))
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    try:
+        if loop is not None and loop.is_running():
+            # Already inside an event loop — run the coroutine in a separate thread
+            # that has its own event loop.
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(
+                    asyncio.run,
+                    _call_mcp_tool_async(mcp_server_url, tool_name, arguments),
+                )
+                return future.result()
+        else:
+            return asyncio.run(_call_mcp_tool_async(mcp_server_url, tool_name, arguments))
     except Exception as exc:
         raise RuntimeError(
             f"Failed to call MCP tool '{tool_name}' at {mcp_server_url}: {exc}"
@@ -69,7 +92,16 @@ def verify_mcp_server(mcp_server_url: str | None = None) -> None:
             raise RuntimeError(f"MCP server is missing required tools: {missing}")
 
     try:
-        asyncio.run(_verify())
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    try:
+        if loop is not None and loop.is_running():
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                pool.submit(asyncio.run, _verify()).result()
+        else:
+            asyncio.run(_verify())
     except Exception as exc:
         raise RuntimeError(
             f"Could not connect to the MCP server at {url}. "

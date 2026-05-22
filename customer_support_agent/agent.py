@@ -17,6 +17,7 @@ from langgraph.prebuilt import ToolNode, tools_condition
 
 from customer_support_agent.config import Settings, get_settings
 from customer_support_agent.profile import (
+    _extract_topics,
     load_user_profile,
     message_has_profile_update,
     normalize_user_id,
@@ -79,12 +80,19 @@ whole conversation.
 After a tool returns a valid observation, produce the final answer from that observation
 unless another different tool call is clearly required. Do not repeat the same tool call
 with the same arguments after it has returned data.
+
+When `show_examples` returns fewer examples than requested and `truncated` is true,
+mention in your answer that only the available examples are shown and that the dataset
+has fewer remaining matches than requested.
 """
 
 
 _CHECKPOINTERS: dict[str, SqliteSaver] = {}
 _CHECKPOINTER_CONNECTIONS: dict[str, sqlite3.Connection] = {}
-_GRAPH_CACHE: dict[tuple[Settings, bool, str | None], object] = {}
+# Cache key: (nebius_model, use_mcp, mcp_server_url) — only the fields that
+# change the graph structure.  Using the full Settings object would work today
+# because it is a frozen dataclass, but an explicit tuple is safer and clearer.
+_GRAPH_CACHE: dict[tuple[str, bool, str | None], object] = {}
 
 
 def _tool_call_signature(message: BaseMessage | None) -> tuple[str, str] | None:
@@ -262,7 +270,7 @@ def build_graph(
     """Compile the LangGraph ReAct graph used by the CLI."""
 
     settings = settings or get_settings()
-    cache_key = (settings, use_mcp, mcp_server_url)
+    cache_key = (settings.nebius_model, use_mcp, mcp_server_url)
     cached_graph = _GRAPH_CACHE.get(cache_key)
     if cached_graph is not None:
         return cached_graph
@@ -305,11 +313,14 @@ def build_graph(
         return {"messages": [AIMessage(content=state["profile_context"])]}
 
     def session_memory_node(state: AgentState) -> dict[str, list[BaseMessage]]:
+        from collections import Counter
+
         human_messages = [
             str(message.content)
             for message in state["messages"]
             if isinstance(message, HumanMessage)
         ]
+        # Exclude the current "what did I ask?" question itself.
         if human_messages:
             human_messages = human_messages[:-1]
 
@@ -319,6 +330,16 @@ def build_graph(
             answer_lines = ["So far in this session, you asked:"]
             for index, question in enumerate(human_messages, start=1):
                 answer_lines.append(f"{index}. {question}")
+
+            # Summarise which dataset topics came up most in this session.
+            session_topics: Counter[str] = Counter()
+            for question in human_messages:
+                session_topics.update(_extract_topics(question))
+            if session_topics:
+                top = session_topics.most_common(3)
+                topic_str = ", ".join(f"{t} ({c})" for t, c in top)
+                answer_lines.append(f"\nThe most-visited topics in this session were: {topic_str}.")
+
             answer = "\n".join(answer_lines)
 
         return {"messages": [AIMessage(content=answer)]}
@@ -412,8 +433,6 @@ def invoke_agent(
             )
         ]
     topic_context = latest_topic_context(result["messages"])
-    if route_decision.route not in {"profile", "profile_update"} and message_has_profile_update(question):
-        update_user_profile(user_id, question, settings, topic_context=topic_context)
-    elif route_decision.route not in {"profile", "profile_update"}:
+    if route_decision.route not in {"profile", "profile_update"}:
         update_user_profile(user_id, question, settings, topic_context=topic_context)
     return result["messages"]

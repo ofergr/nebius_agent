@@ -121,10 +121,12 @@ def show_examples_impl(
         dataset.row_to_public_dict(row)
         for _, row in frame.iloc[offset : offset + limit].iterrows()
     ]
+    available_after_offset = max(0, len(frame) - offset)
     return {
         "total_matches": int(len(frame)),
         "offset": offset,
         "returned": len(examples),
+        "truncated": len(examples) < limit and available_after_offset > 0,
         "examples": examples,
     }
 
