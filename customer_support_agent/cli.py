@@ -3,54 +3,19 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Iterable
 from typing import Literal
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
-
 from customer_support_agent.agent import invoke_agent, reset_checkpoint_db
+from customer_support_agent.chat_view import final_answer, new_messages_for_turn, reasoning_steps
 from customer_support_agent.config import get_mcp_server_url
 from customer_support_agent.mcp_tools import verify_mcp_server
 from customer_support_agent.profile import normalize_user_id
 
 
-def _print_reasoning(
-    messages: Iterable[BaseMessage],
-    tool_mode: Literal["local", "mcp"] = "local",
-) -> None:
-    tool_call_label = "mcp tool call" if tool_mode == "mcp" else "tool call"
-    observation_label = "mcp observation" if tool_mode == "mcp" else "observation"
-    for message in messages:
-        if isinstance(message, AIMessage) and message.tool_calls:
-            for call in message.tool_calls:
-                print(f"\n[{tool_call_label}] {call['name']}({call['args']})")
-        elif isinstance(message, ToolMessage):
-            print(f"[{observation_label}] {message.name}: {message.content[:1200]}")
-
-
-def _final_answer(messages: list[BaseMessage]) -> str:
-    for message in reversed(messages):
-        if isinstance(message, AIMessage) and not message.tool_calls:
-            return str(message.content)
-    return "I could not produce a final answer."
-
-
-def _new_messages_for_turn(messages: list[BaseMessage]) -> list[BaseMessage]:
-    """Return only the messages produced in the current user turn.
-
-    The checkpointed graph returns the full session history, so the CLI trims the
-    output to the last human turn and everything after it.
-    """
-
-    last_human_index = None
-    for index in range(len(messages) - 1, -1, -1):
-        if isinstance(messages[index], HumanMessage):
-            last_human_index = index
-            break
-
-    if last_human_index is None:
-        return messages
-    return messages[last_human_index + 1 :]
+def _print_reasoning(messages, tool_mode: Literal["local", "mcp"] = "local") -> None:
+    for step in reasoning_steps(messages, tool_mode=tool_mode):
+        prefix = "\n" if step["kind"] == "tool_call" else ""
+        print(f"{prefix}[{step['label']}] {step['content']}")
 
 
 def main() -> None:
@@ -99,8 +64,8 @@ def main() -> None:
             use_mcp=args.use_mcp,
             mcp_server_url=mcp_server_url,
         )
-        _print_reasoning(_new_messages_for_turn(messages), tool_mode=tool_mode)
-        print(f"\nAssistant: {_final_answer(messages)}")
+        _print_reasoning(new_messages_for_turn(messages), tool_mode=tool_mode)
+        print(f"\nAssistant: {final_answer(messages)}")
         return
 
     print("Customer Support Data Analyst Agent")
@@ -124,5 +89,5 @@ def main() -> None:
             use_mcp=args.use_mcp,
             mcp_server_url=mcp_server_url,
         )
-        _print_reasoning(_new_messages_for_turn(messages), tool_mode=tool_mode)
-        print(f"\nAssistant: {_final_answer(messages)}")
+        _print_reasoning(new_messages_for_turn(messages), tool_mode=tool_mode)
+        print(f"\nAssistant: {final_answer(messages)}")

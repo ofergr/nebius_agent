@@ -49,6 +49,23 @@ python main.py --use-mcp
 python main.py --once "How many refund requests did we get?" --use-mcp
 ```
 
+## Run The Streamlit UI
+
+Bonus A is implemented in [streamlit_app.py](/Users/oferg/work/nebius/week5a/0501/nebius_agent/streamlit_app.py).
+
+Start the chat UI with:
+
+```bash
+streamlit run streamlit_app.py
+```
+
+The Streamlit app provides:
+
+- a chat interface for asking dataset questions
+- visible reasoning steps for each turn, including tool calls and tool observations
+- a sidebar session ID input so you can keep using the same LangGraph conversation memory
+- an optional `Use MCP server` toggle to route tool calls through the standalone MCP server
+
 Resume the same conversation across restarts:
 
 ```bash
@@ -221,6 +238,7 @@ MCP_SERVER_PATH
 What categories exist in the dataset?
 How many refund requests did we get?
 Show me 5 examples of the SHIPPING category.
+Show me one more example.
 Summarize how agents respond to complaint intents.
 Show me examples of people wanting their money back.
 What is the distribution of intents in the ACCOUNT category?

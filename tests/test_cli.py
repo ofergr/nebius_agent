@@ -18,7 +18,7 @@ def test_use_mcp_flag_validates_server_and_invokes_agent(monkeypatch, capsys) ->
 
     monkeypatch.setattr(cli, "invoke_agent", fake_invoke_agent)
     monkeypatch.setattr(cli, "_print_reasoning", lambda *args, **kwargs: None)
-    monkeypatch.setattr(cli, "_final_answer", lambda _messages: "done")
+    monkeypatch.setattr(cli, "final_answer", lambda _messages: "done")
 
     cli.main()
 
